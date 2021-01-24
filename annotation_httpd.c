@@ -22,11 +22,12 @@
 #include <strings.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <pthread.h>
+//#include <pthread.h>
 #include <sys/wait.h>
 #include <stdlib.h>
 #include <stdint.h>
 
+//isspace：判断是否是空格符，强制类型转换为int型是常规做法
 #define ISspace(x) isspace((int)(x))
 
 #define SERVER_STRING "Server: jdbhttpd/0.1.0\r\n"
@@ -34,18 +35,18 @@
 #define STDOUT  1
 #define STDERR  2
 
-void accept_request(void *);	//处理从套接字上监听到的一个 HTTP 请求，在这里可以很大一部分地体现服务器处理请求流程。
-void bad_request(int);			//返回给客户端这是个错误请求，HTTP 状态吗 400 BAD REQUEST.
-void cat(int, FILE *);			//读取服务器上某个文件写到 socket 套接字。
-void cannot_execute(int);		//主要处理发生在执行 cgi 程序时出现的错误。
-void error_die(const char *);	//把错误信息写到 perror 并退出。
-void execute_cgi(int, const char *, const char *, const char *);	//运行 cgi 程序的处理，也是个主要函数。
-int get_line(int, char *, int);	//读取套接字的一行，把回车换行等情况都统一为换行符结束。
-void headers(int, const char *);//把 HTTP 响应的头部写到套接字。
-void not_found(int);			//主要处理找不到请求的文件时的情况。
-void serve_file(int, const char *);			//调用 cat 把服务器文件返回给浏览器。
-int startup(u_short *);			//初始化 httpd 服务，包括建立套接字，绑定端口，进行监听等。
-void unimplemented(int);		//返回给浏览器表明收到的 HTTP 请求所用的 method 不被支持。
+void accept_request(void *);
+void bad_request(int);
+void cat(int, FILE *);
+void cannot_execute(int);
+void error_die(const char *);
+void execute_cgi(int, const char *, const char *, const char *);
+int get_line(int, char *, int);
+void headers(int, const char *);
+void not_found(int);
+void serve_file(int, const char *);
+int startup(u_short *);
+void unimplemented(int);
 
 /**********************************************************************/
 /* A request has caused a call to accept() on the server port to
@@ -54,6 +55,7 @@ void unimplemented(int);		//返回给浏览器表明收到的 HTTP 请求所用的 method 不被支
 /**********************************************************************/
 void accept_request(void *arg)
 {
+	//传参是连接了client的socket
     int client = (intptr_t)arg;
     char buf[1024];
     size_t numchars;
@@ -66,8 +68,11 @@ void accept_request(void *arg)
                        * program */
     char *query_string = NULL;
 
+	//读取HTTP的第一行，以\0终止：【方法 URL 版本\r\n】
     numchars = get_line(client, buf, sizeof(buf));
     i = 0; j = 0;
+
+	//提取报文中的方法。因为HTTP的第一行结构是【方法 URL 版本\r\n】
     while (!ISspace(buf[i]) && (i < sizeof(method) - 1))
     {
         method[i] = buf[i];
@@ -76,6 +81,7 @@ void accept_request(void *arg)
     j=i;
     method[i] = '\0';
 
+	//既不是GET也不是POST的话，就返回静态信息。目前功能未实现，只返回固定的内容，这里是为了方便以后方法拓展。
     if (strcasecmp(method, "GET") && strcasecmp(method, "POST"))
     {
         unimplemented(client);
@@ -85,6 +91,7 @@ void accept_request(void *arg)
     if (strcasecmp(method, "POST") == 0)
         cgi = 1;
 
+	//读取资源定位符
     i = 0;
     while (ISspace(buf[j]) && (j < numchars))
         j++;
@@ -95,6 +102,7 @@ void accept_request(void *arg)
     }
     url[i] = '\0';
 
+	//如果是GET请求。提取？前的字符。？前的是URL，？后的是参数
     if (strcasecmp(method, "GET") == 0)
     {
         query_string = url;
@@ -108,22 +116,33 @@ void accept_request(void *arg)
         }
     }
 
+	//指定只在htdocs文件夹下找
     sprintf(path, "htdocs%s", url);
+	//如果未指定获取文件，就使用默认文件
     if (path[strlen(path) - 1] == '/')
         strcat(path, "index.html");
+	//stat函数：取得指定文件的文件属性，文件属性存储在结构体stat里。成功时返回0，失败时返回-1。
+	//如果服务器上没有这个文件，调用not_found返回未找到的报文。
     if (stat(path, &st) == -1) {
+		//一直读到最后，为的其实是清空tcp buffer。因为这个文件找不到，后面的内容都没必要看了。
         while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
             numchars = get_line(client, buf, sizeof(buf));
         not_found(client);
     }
     else
     {
+		//S_IFMT是文件掩码0xF0000,S_IFDIR表示这是个目录0x4000
+		//如果URL的最后忘记加/，就执行这个判断，并加上默认文件名
         if ((st.st_mode & S_IFMT) == S_IFDIR)
             strcat(path, "/index.html");
+		//S_IXUSR：当前用户有运行权限
+		//S_IXGRP：组用户有读权限
+		//S_IXOTH：其他用户有运行权限
         if ((st.st_mode & S_IXUSR) ||
                 (st.st_mode & S_IXGRP) ||
                 (st.st_mode & S_IXOTH)    )
             cgi = 1;
+		//如果文件不具备以上任意权限，也不是POST方法，也不是带参数的GET方法，那就直接发送文件回去
         if (!cgi)
             serve_file(client, path);
         else
@@ -221,15 +240,20 @@ void execute_cgi(int client, const char *path,
     int content_length = -1;
 
     buf[0] = 'A'; buf[1] = '\0';
+	//如果是GET，一直读，无视headers，清空tcp buffer
     if (strcasecmp(method, "GET") == 0)
         while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
             numchars = get_line(client, buf, sizeof(buf));
     else if (strcasecmp(method, "POST") == 0) /*POST*/
     {
         numchars = get_line(client, buf, sizeof(buf));
+		//一直读请求头，直到找到Content-Length所在的那一行，提取其中的content_length参数。然后一直读，清空tcp buffer。
         while ((numchars > 0) && strcmp("\n", buf))
         {
+			//对于每一行请求头，直接将buf[15]置为\0。实际上是为了提取每行前14个字符，补个\0构成字符串才可以使用strcasecmp进行比较。
             buf[15] = '\0';
+			//对于POST报文，Content-Length请求头是必须的，所以可以直接写死。
+			//当遇到Content-Length:所在行时，Content-Length:总共14个字符，然后前面在索引15处放了\0，刚好构成字符串"Content-Length:"。
             if (strcasecmp(buf, "Content-Length:") == 0)
                 content_length = atoi(&(buf[16]));
             numchars = get_line(client, buf, sizeof(buf));
@@ -243,6 +267,10 @@ void execute_cgi(int client, const char *path,
     {
     }
 
+	/*#include<unistd.h>
+	int pipe(int filedes[2]);*/
+	//管道，filedes[0]会存读管道，filedes[1]会存写管道。pipe函数成功调用则返回0，失败返回-1。
+	//当对管道进行写入时，如果写入的数据小于128K则是非原子的，如果大于128K则会一直写入管道，直到全部数据被读完，如果没人读就会阻塞。
 
     if (pipe(cgi_output) < 0) {
         cannot_execute(client);
@@ -253,24 +281,39 @@ void execute_cgi(int client, const char *path,
         return;
     }
 
+	//fork创建子进程，返回负值表示创建失败。创建失败的原因可能是内存不足，也可能是进程数达到系统上限了。
     if ( (pid = fork()) < 0 ) {
         cannot_execute(client);
         return;
     }
+
+	//告诉client，我收到消息了。
     sprintf(buf, "HTTP/1.0 200 OK\r\n");
     send(client, buf, strlen(buf), 0);
+
+	//子进程的fork返回值是0。
     if (pid == 0)  /* child: CGI script */
     {
         char meth_env[255];
         char query_env[255];
         char length_env[255];
 
-        dup2(cgi_output[1], STDOUT);
-        dup2(cgi_input[0], STDIN);
-        close(cgi_output[0]);
-        close(cgi_input[1]);
-        sprintf(meth_env, "REQUEST_METHOD=%s", method);
-        putenv(meth_env);
+		//#include <unistd.h>
+		//int dup2(int oldfd, int newfd);
+		/*dup2函数将newfd这个文件描述符指向oldfd的文件。如果newfd原本有指向的文件，则关闭原文件。
+		与之类似的有dup(int oldfd)函数，它返回当前进程可用的最小文件描述符，指向与oldfd相同的文件。
+		dup2常用于标准输入输出的重定向，dup可和dup2搭配使用，先用dup存下标准输入输出的文件，dup2进行重定向后，借助dup备份的文件描述符进行重定向的复原。
+		*/
+
+		
+        dup2(cgi_output[1], STDOUT);//将cgi_output的写管道绑定到STDOUT，就是原本会输出到标准输出的数据，现在会输出到cgi_output的写管道里。
+        dup2(cgi_input[0], STDIN);	//将cgi_input的读管道绑定到STDIN，就是原本会输入到标准输入的数据，现在会输入到cgi_input的读管道里。
+        close(cgi_output[0]);		//关闭子进程cgi_output的写管道。
+        close(cgi_input[1]);		//关闭子进程cgi_input的读管道。常规做法，管道也是文件，与父进程共享。父进程关一端，子进程关另一端，这样父子进程之间就可以实现单向的通信。
+        
+		//配置各种环境变量。【待补充】
+		sprintf(meth_env, "REQUEST_METHOD=%s", method);
+        putenv(meth_env);			
         if (strcasecmp(method, "GET") == 0) {
             sprintf(query_env, "QUERY_STRING=%s", query_string);
             putenv(query_env);
@@ -279,22 +322,30 @@ void execute_cgi(int client, const char *path,
             sprintf(length_env, "CONTENT_LENGTH=%d", content_length);
             putenv(length_env);
         }
+
+		//执行请求中指定路径的文件，NULL表示不需传参了。
         execl(path, NULL);
         exit(0);
     } else {    /* parent */
+		//子进程关了一边管道，父进程关另一边。
         close(cgi_output[1]);
         close(cgi_input[0]);
         if (strcasecmp(method, "POST") == 0)
+			//一个字节一个字节地，将请求主体通过父进程传给子进程。
+			//【父进程】cgi_input[1]写管道——>【子进程】cgi_input[0]读管道
             for (i = 0; i < content_length; i++) {
                 recv(client, &c, 1, 0);
                 write(cgi_input[1], &c, 1);
             }
+
+		//将消息传完给子进程之后，等子进程处理请求。如果子进程执行请求时有任何输出到STDOUT的东西，都会通过重定向之后输出到管道里。
+		//【子进程】处理请求，如果有内容输出到STDOUT（已经重定向到cgi_output写管道了）——>【父进程】从cgi_output读管道接收输出——>将输出返回给client
         while (read(cgi_output[0], &c, 1) > 0)
             send(client, &c, 1, 0);
 
         close(cgi_output[0]);
         close(cgi_input[1]);
-        waitpid(pid, &status, 0);
+        waitpid(pid, &status, 0);	//等子进程结束
     }
 }
 
@@ -317,14 +368,20 @@ int get_line(int sock, char *buf, int size)
     char c = '\0';
     int n;
 
+	//buf容量有空余，并且输入的最后没有\n：最后补终止符\0
+	//buf容量有空余，并且输入的最后是\n：最后记录\n再补一个终止符\0
+	//buf容量不够：最后补终止符
     while ((i < size - 1) && (c != '\n'))
     {
         n = recv(sock, &c, 1, 0);
         /* DEBUG printf("%02X\n", c); */
         if (n > 0)
         {
+			//如果提前读到换行符，将它替换为回车符号。if ((n > 0) && (c == '\n'))的判断是为了将\t\n的常见组合也当成一个回车来处理。
             if (c == '\r')
             {
+				//读1个字符。MSG_PEEK表示从tcp buffer中读取数据但是不清空tcp buffer，这样下次可以再次读这个数据。
+				//如果这个参数是0，则读完之后还会从tcp buffer中删除已读数据
                 n = recv(sock, &c, 1, MSG_PEEK);
                 /* DEBUG printf("%02X\n", c); */
                 if ((n > 0) && (c == '\n'))
@@ -338,6 +395,7 @@ int get_line(int sock, char *buf, int size)
         else
             c = '\n';
     }
+	//在读取内容的最后补一个终止符。所以while循环里是小于size-1而不是小于size，因为最后要留一个回车的空间。
     buf[i] = '\0';
 
     return(i);
@@ -403,6 +461,7 @@ void serve_file(int client, const char *filename)
     int numchars = 1;
     char buf[1024];
 
+	//一直读到尽头，为了清空tcp buffer。headers不进行处理
     buf[0] = 'A'; buf[1] = '\0';
     while ((numchars > 0) && strcmp("\n", buf))  /* read & discard headers */
         numchars = get_line(client, buf, sizeof(buf));
@@ -412,7 +471,9 @@ void serve_file(int client, const char *filename)
         not_found(client);
     else
     {
+		//返回固定内容
         headers(client, filename);
+		//将文件内容发过去
         cat(client, resource);
     }
     fclose(resource);
@@ -432,17 +493,24 @@ int startup(u_short *port)
     int on = 1;
     struct sockaddr_in name;
 
+    //generate server sockaddr
     httpd = socket(PF_INET, SOCK_STREAM, 0);
     if (httpd == -1)
         error_die("socket");
     memset(&name, 0, sizeof(name));
     name.sin_family = AF_INET;
-    name.sin_port = htons(*port);
-    name.sin_addr.s_addr = htonl(INADDR_ANY);
-    if ((setsockopt(httpd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)  
-    {  
+    name.sin_port = htons(*port);               //指定服务端端口为port = 4000
+    name.sin_addr.s_addr = htonl(INADDR_ANY);   //INADDR_ANY ：系统中任意可用的IP地址（相当于提取当前电脑的IP地址）
+
+	//setsockopt是设置socket属性的函数，如果无错误发生会返回0，否则返回SOCKET_ERROR。
+	/*SO_REUSEADDR：如果在已经处于ESTABLISHED状态下的socket调用close，一般不会立即关闭而经历TIME_WAIT的过程，最长需等待4分钟。
+	这里由于可能重复启动程序进行调试，需要重用该socket，所以需要设置SO_REUSEADDR模式*/
+    if ((setsockopt(httpd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on))) < 0)
+    {
         error_die("setsockopt failed");
     }
+
+	//将服务器的socket结构体（记录了端口和IP信息了）和端口绑定起来
     if (bind(httpd, (struct sockaddr *)&name, sizeof(name)) < 0)
         error_die("bind");
     if (*port == 0)  /* if dynamically allocating a port */
@@ -450,8 +518,10 @@ int startup(u_short *port)
         socklen_t namelen = sizeof(name);
         if (getsockname(httpd, (struct sockaddr *)&name, &namelen) == -1)
             error_die("getsockname");
-        *port = ntohs(name.sin_port);
+        *port = ntohs(name.sin_port);	//网络字节序（大端）转电脑的字节序，s表示16字节
     }
+
+	//监听，最多监听五个
     if (listen(httpd, 5) < 0)
         error_die("listen");
     return(httpd);
@@ -493,24 +563,41 @@ int main(void)
     int client_sock = -1;
     struct sockaddr_in client_name;
     socklen_t  client_name_len = sizeof(client_name);
-    pthread_t newthread;
+    //pthread_t newthread;
 
-    server_sock = startup(&port);
+    server_sock = startup(&port);       //构造服务端的ocket，绑定端口，进入listen状态
     printf("httpd running on port %d\n", port);
 
     while (1)
     {
+        //while client connecting
         client_sock = accept(server_sock,
                 (struct sockaddr *)&client_name,
                 &client_name_len);
         if (client_sock == -1)
             error_die("accept");
-        /* accept_request(&client_sock); */
-        if (pthread_create(&newthread , NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0)
-            perror("pthread_create");
+        accept_request(&client_sock);       //解析请求。提取方法（GET or POST），处理URL（补全默认文件，分割参数部分），执行文件读取操作/执行cgi程序。
+											//如果是读取文件操作，直接由当前进程读取文件并发送回client。
+											//如果是执行cgi程序：创建子进程，构建父子进程间的管道，子进程标准输入输出重定向并执行程序，父进程通过管道获得cgi程序输出数据并发送回client。
+        //if (pthread_create(&newthread , NULL, (void *)accept_request, (void *)(intptr_t)client_sock) != 0)
+            //perror("pthread_create");
     }
 
     close(server_sock);
 
     return(0);
 }
+
+/*
+服务器端 CGI 程序接收信息有三种途径：环境变量、命令行和标准输入。
+其中环境变量是指 CGI 定义一组环境变量，通过环境变量可传递数据。服务器收到来自浏览器的数据，调用 CGI 脚本，CGI 脚本将收到的数据转换成环境变量并从中取出所需要的内容。
+<form>标签的 METHOD 属性来决定具体使用哪一种方法。在“METHOD=GET”时，向 CGI 传递表单编码信息的是通过命令来进行的。
+表单编码信息大多数是通过环境变量 QUERY_STRING 来传递的。若“METHOD=POST”，表单信息通过标准输入来读取。
+还有一种不使用表单就可以向 CGI 传送信息的方法，那就是把信息直接附在 URL 地址后面，信息和URL 之间用问号（?）来进行分隔。
+GET 方法是对数据的一个请求，被用于获得静态文档。GET 方法通过将发送请求信息附加在 URL 后面的参数。当 GET 方法被使用时，CGI 程序将会从环境变量 QUERY_STRING获取数据。
+为了正确的响应客户端发来的请求，CGI 必须对 QUERY_STRING 中的字符串进行分析。
+当用户需要从服务器获取数据，但服务器上的数据不得改变时，应该用 GET 方法；但是如果请求中的字符串超过了一定长度，通常是 1024 字节，那么这时，只能用 POST 方法。
+POST 方法：浏览器将通过填写表单将数据传给服务器时一般采用POST 方法。在发送的数据超过 1024 字节时必须采用 POST 方法。
+当 POST 方法被使用时，Web 服务器向CGI 程序的标准输入 STDIN 传送数据。环境变量 CONTENT_LENGTH 存放着发送的数据长度。
+CGI 程序必须检查环境变量 REQUEST_METHOD 以确定有没有采用了 POST 方法，并决定是否要读取标准输入STDIN。
+*/
